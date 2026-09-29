@@ -1,1 +1,580 @@
+import cv2
+import mediapipe as mp
+import math
+import pygame
+import time
 
+# ============================================================
+# INITIALIZE PYGAME / ALARM
+# ============================================================
+
+pygame.mixer.init()
+
+try:
+    pygame.mixer.music.load("alarm.wav")
+    print("Alarm sound loaded successfully.")
+except pygame.error:
+    print("ERROR: alarm.wav not found.")
+    print("Place alarm.wav in the same folder as d_d.py")
+
+
+# ============================================================
+# MEDIAPIPE FACE MESH
+# ============================================================
+
+mp_face_mesh = mp.solutions.face_mesh
+
+face_mesh = mp_face_mesh.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+
+# ============================================================
+# LANDMARKS
+# ============================================================
+
+# Left eye
+LEFT_EYE = [33, 160, 158, 133, 153, 144]
+
+# Right eye
+RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+
+# Mouth landmarks
+MOUTH_TOP = 13
+MOUTH_BOTTOM = 14
+MOUTH_LEFT = 61
+MOUTH_RIGHT = 291
+
+# Head pose landmarks
+NOSE_TIP = 1
+CHIN = 152
+LEFT_FACE = 234
+RIGHT_FACE = 454
+
+
+# ============================================================
+# THRESHOLDS
+# ============================================================
+
+# Eye Aspect Ratio
+EAR_THRESHOLD = 0.40
+
+# Number of frames eyes must remain closed
+EYE_FRAME_THRESHOLD = 25
+
+# Mouth Aspect Ratio
+MAR_THRESHOLD = 0.60
+
+# Number of frames mouth must remain open
+YAWN_FRAME_THRESHOLD = 15
+
+# Head tilt / abnormal position thresholds
+HEAD_TILT_THRESHOLD = 25
+
+# Head down threshold
+HEAD_DOWN_THRESHOLD = 20
+
+# Time before severe head position warning
+HEAD_WARNING_TIME = 2.0
+
+
+# ============================================================
+# COUNTERS
+# ============================================================
+
+eye_counter = 0
+yawn_counter = 0
+
+head_abnormal_start = None
+
+
+# ============================================================
+# DISTANCE FUNCTION
+# ============================================================
+
+def euclidean(p1, p2):
+
+    return math.sqrt(
+        (p1[0] - p2[0]) ** 2 +
+        (p1[1] - p2[1]) ** 2
+    )
+
+
+# ============================================================
+# EAR CALCULATION
+# ============================================================
+
+def calculate_ear(landmarks, eye):
+
+    p1 = landmarks[eye[0]]
+    p2 = landmarks[eye[1]]
+    p3 = landmarks[eye[2]]
+    p4 = landmarks[eye[3]]
+    p5 = landmarks[eye[4]]
+    p6 = landmarks[eye[5]]
+
+    vertical1 = euclidean(p2, p5)
+    vertical2 = euclidean(p3, p6)
+
+    horizontal = euclidean(p1, p4)
+
+    ear = (vertical1 + vertical2) / (2.0 * horizontal)
+
+    return ear
+
+
+# ============================================================
+# MAR CALCULATION
+# ============================================================
+
+def calculate_mar(landmarks):
+
+    vertical = euclidean(
+        landmarks[MOUTH_TOP],
+        landmarks[MOUTH_BOTTOM]
+    )
+
+    horizontal = euclidean(
+        landmarks[MOUTH_LEFT],
+        landmarks[MOUTH_RIGHT]
+    )
+
+    mar = vertical / horizontal
+
+    return mar
+
+
+# ============================================================
+# HEAD POSE CALCULATION
+# ============================================================
+
+def calculate_head_pose(landmarks):
+
+    nose = landmarks[NOSE_TIP]
+    chin = landmarks[CHIN]
+
+    left_face = landmarks[LEFT_FACE]
+    right_face = landmarks[RIGHT_FACE]
+
+    # ------------------------------------------
+    # LEFT / RIGHT HEAD TILT
+    # ------------------------------------------
+
+    dx = right_face[0] - left_face[0]
+    dy = right_face[1] - left_face[1]
+
+    roll_angle = math.degrees(
+        math.atan2(dy, dx)
+    )
+
+    # ------------------------------------------
+    # HEAD DOWN / UP
+    # ------------------------------------------
+
+    face_height = abs(chin[1] - nose[1])
+
+    if face_height == 0:
+        return roll_angle, 0
+
+    # Relative vertical position of nose
+    nose_ratio = (
+        nose[1] - left_face[1]
+    ) / face_height
+
+    return roll_angle, nose_ratio
+
+
+# ============================================================
+# START CAMERA
+# ============================================================
+
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+
+    print("ERROR: Camera could not be opened.")
+    exit()
+
+
+print("------------------------------------------")
+print("AI DRIVER MONITORING SYSTEM")
+print("------------------------------------------")
+print("Eye Closure Detection : ON")
+print("Yawning Detection     : ON")
+print("Head Pose Detection   : ON")
+print("Alarm System          : ON")
+print("Press Q to exit")
+print("------------------------------------------")
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+
+while True:
+
+    ret, frame = cap.read()
+
+    if not ret:
+        print("Camera frame error.")
+        break
+
+
+    # Mirror the camera
+    frame = cv2.flip(frame, 1)
+
+    height, width, _ = frame.shape
+
+
+    # Convert BGR → RGB
+    rgb = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
+
+
+    # Process face
+    result = face_mesh.process(rgb)
+
+
+    # ========================================================
+    # DEFAULT STATUS
+    # ========================================================
+
+    status = "DRIVER ALERT"
+    status_color = (0, 255, 0)
+
+    drowsiness_detected = False
+    yawn_detected = False
+    head_warning = False
+
+
+    # ========================================================
+    # FACE DETECTED
+    # ========================================================
+
+    if result.multi_face_landmarks:
+
+        face_landmarks = result.multi_face_landmarks[0]
+
+        landmarks = []
+
+        for lm in face_landmarks.landmark:
+
+            x = int(lm.x * width)
+            y = int(lm.y * height)
+
+            landmarks.append((x, y))
+
+
+        # ====================================================
+        # EAR
+        # ====================================================
+
+        left_ear = calculate_ear(
+            landmarks,
+            LEFT_EYE
+        )
+
+        right_ear = calculate_ear(
+            landmarks,
+            RIGHT_EYE
+        )
+
+        ear = (left_ear + right_ear) / 2.0
+
+
+        # ====================================================
+        # MAR
+        # ====================================================
+
+        mar = calculate_mar(landmarks)
+
+
+        # ====================================================
+        # HEAD POSE
+        # ====================================================
+
+        roll_angle, nose_ratio = calculate_head_pose(
+            landmarks
+        )
+
+
+        # ====================================================
+        # EYE CLOSURE DETECTION
+        # ====================================================
+
+        if ear < EAR_THRESHOLD:
+
+            eye_counter += 1
+
+        else:
+
+            eye_counter = 0
+
+
+        if eye_counter >= EYE_FRAME_THRESHOLD:
+
+            drowsiness_detected = True
+
+
+        # ====================================================
+        # YAWNING DETECTION
+        # ====================================================
+
+        if mar > MAR_THRESHOLD:
+
+            yawn_counter += 1
+
+        else:
+
+            yawn_counter = 0
+
+
+        if yawn_counter >= YAWN_FRAME_THRESHOLD:
+
+            yawn_detected = True
+
+
+        # ====================================================
+        # HEAD POSITION DETECTION
+        # ====================================================
+
+        abnormal_head = False
+
+        # Head tilted sideways
+        if abs(roll_angle) > HEAD_TILT_THRESHOLD:
+
+            abnormal_head = True
+
+        # Head position significantly changed
+        if nose_ratio > 0.65:
+
+            abnormal_head = True
+
+
+        if abnormal_head:
+
+            if head_abnormal_start is None:
+
+                head_abnormal_start = time.time()
+
+            elif (
+                time.time() - head_abnormal_start
+                >= HEAD_WARNING_TIME
+            ):
+
+                head_warning = True
+
+        else:
+
+            head_abnormal_start = None
+
+
+        # ====================================================
+        # DISPLAY EAR
+        # ====================================================
+
+        cv2.putText(
+            frame,
+            f"EAR: {ear:.2f}",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2
+        )
+
+
+        # ====================================================
+        # DISPLAY MAR
+        # ====================================================
+
+        cv2.putText(
+            frame,
+            f"MAR: {mar:.2f}",
+            (20, 65),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2
+        )
+
+
+        # ====================================================
+        # DISPLAY HEAD ANGLE
+        # ====================================================
+
+        cv2.putText(
+            frame,
+            f"Head Tilt: {roll_angle:.1f}",
+            (20, 95),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2
+        )
+
+
+        # ====================================================
+        # DETERMINE SYSTEM STATUS
+        # ====================================================
+
+        if drowsiness_detected:
+
+            status = "DROWSINESS DETECTED!"
+            status_color = (0, 0, 255)
+
+
+        elif yawn_detected:
+
+            status = "YAWNING / FATIGUE DETECTED!"
+            status_color = (0, 165, 255)
+
+
+        elif head_warning:
+
+            status = "ABNORMAL HEAD POSITION!"
+            status_color = (0, 0, 255)
+
+
+        # ====================================================
+        # DISPLAY STATUS
+        # ====================================================
+
+        cv2.putText(
+            frame,
+            status,
+            (40, 140),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            status_color,
+            3
+        )
+
+
+        # ====================================================
+        # ADDITIONAL INFORMATION
+        # ====================================================
+
+        if drowsiness_detected:
+
+            cv2.putText(
+                frame,
+                "Eyes closed for prolonged duration",
+                (40, 175),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2
+            )
+
+
+        elif yawn_detected:
+
+            cv2.putText(
+                frame,
+                "Possible fatigue detected",
+                (40, 175),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 165, 255),
+                2
+            )
+
+
+        elif head_warning:
+
+            cv2.putText(
+                frame,
+                "Driver head position abnormal",
+                (40, 175),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2
+            )
+
+
+        # ====================================================
+        # ALARM
+        # ====================================================
+
+        if (
+            drowsiness_detected
+            or yawn_detected
+            or head_warning
+        ):
+
+            if not pygame.mixer.music.get_busy():
+
+                pygame.mixer.music.play()
+
+        else:
+
+            if pygame.mixer.music.get_busy():
+
+                pygame.mixer.music.stop()
+
+
+    # ========================================================
+    # NO FACE DETECTED
+    # ========================================================
+
+    else:
+
+        cv2.putText(
+            frame,
+            "NO DRIVER FACE DETECTED",
+            (40, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (0, 0, 255),
+            3
+        )
+
+        # Stop alarm
+        if pygame.mixer.music.get_busy():
+
+            pygame.mixer.music.stop()
+
+
+    # ========================================================
+    # SHOW CAMERA
+    # ========================================================
+
+    cv2.imshow(
+        "AI-Based Driver Monitoring System",
+        frame
+    )
+
+
+    # ========================================================
+    # EXIT
+    # ========================================================
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord('q'):
+
+        break
+
+
+# ============================================================
+# CLEANUP
+# ============================================================
+
+if pygame.mixer.music.get_busy():
+
+    pygame.mixer.music.stop()
+
+cap.release()
+
+cv2.destroyAllWindows()
+
+pygame.quit()
+
+print("System stopped.")
