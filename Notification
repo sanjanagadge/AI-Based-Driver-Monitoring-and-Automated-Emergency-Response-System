@@ -1,0 +1,32 @@
+import pywhatkit as kit
+import time
+
+latitude = 12.859995
+longitude = 77.5417
+
+location_link = f"https://maps.app.goo.gl/BDvyLVsqySvouKyi6?g_st=aw{latitude},{longitude}"
+
+message = f"""
+🚨 EMERGENCY ALERT 🚨
+
+Driver may be unconscious.
+
+Location:
+{location_link}
+
+Please contact immediately.
+"""
+
+# Recipient number with country code
+phone_number = "+918618539990"
+
+# Send WhatsApp message
+kit.sendwhatmsg_instantly(
+    phone_no=phone_number,
+    message=message,
+    wait_time=30,
+    tab_close=False
+    
+)
+
+print("WhatsApp message sent!")
